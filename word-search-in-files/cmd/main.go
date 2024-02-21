@@ -10,16 +10,12 @@ import (
 	"os"
 	"sync"
 	"time"
+	"word-search-in-files/internal/args"
 	"word-search-in-files/pkg/searcher"
 )
 
-const (
-	addr = ":3333"
-	path = "examples/simple"
-)
-
-func encodeJSON(data any) ([]byte, error) {
-	return json.Marshal(data)
+type ErrorResponse struct {
+	Errors []error `json:"errors"`
 }
 
 func searchHandler(w http.ResponseWriter, r *http.Request, srch *searcher.Searcher) {
@@ -40,23 +36,25 @@ func searchHandler(w http.ResponseWriter, r *http.Request, srch *searcher.Search
 
 	files, errors := srch.Search(word)
 	if errors != nil {
-		jsonData, e = encodeJSON(errors)
+		strErrors := make([]string, len(errors))
+
+		for i, err := range errors {
+			strErrors[i] = err.Error()
+		}
+
+		jsonData, e = json.Marshal(strErrors)
 		if e != nil {
 			http.Error(w, "Err: encoding JSON", http.StatusInternalServerError)
 			return
 		}
 		status = http.StatusInternalServerError
 	} else {
-		jsonData, _ = encodeJSON(files)
+		jsonData, e = json.Marshal(files)
 		if e != nil {
 			http.Error(w, "Err: encoding JSON", http.StatusInternalServerError)
 			return
 		}
-		if files == nil {
-			status = http.StatusNotFound
-		} else {
-			status = http.StatusOK
-		}
+		status = http.StatusOK
 	}
 
 	w.WriteHeader(status)
@@ -66,39 +64,23 @@ func searchHandler(w http.ResponseWriter, r *http.Request, srch *searcher.Search
 	}
 }
 
-func scanPeriodically(srch *searcher.Searcher, wg *sync.WaitGroup, ctx context.Context, interval time.Duration) {
-
-	srch.Scan()
-
-	wg.Done()
-
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			srch.Scan()
-		}
-	}
-}
-
 func main() {
+	args := args.ArgsParse()
 
-	srch, e := searcher.NewSearcher(path)
+	srch, e := searcher.NewSearcher(args.Path)
 	if e != nil {
 		log.Println(e)
 		return
 	}
 
+	// Not used
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	wg := &sync.WaitGroup{}
 	wg.Add(1)
-	go scanPeriodically(srch, wg, ctx, time.Hour)
+	go srch.ScanPeriodically(ctx, wg, time.Hour)
+	// Wait for the 'init' scan to complete to do not run other code first (http handler)
 	wg.Wait()
 
 	mux := http.NewServeMux()
@@ -106,7 +88,7 @@ func main() {
 		searchHandler(w, r, srch)
 	})
 
-	e = http.ListenAndServe(addr, mux)
+	e = http.ListenAndServe(args.HttpAddr, mux)
 
 	if errors.Is(e, http.ErrServerClosed) {
 		fmt.Printf("server closed\n")
@@ -114,4 +96,5 @@ func main() {
 		fmt.Printf("error starting server: %s\n", e)
 		os.Exit(1)
 	}
+
 }

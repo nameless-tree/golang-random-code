@@ -3,6 +3,7 @@ package searcher
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -81,12 +82,6 @@ func newSearcherSync() (*SearcherSync, error) {
 	}, nil
 }
 
-func (s *Searcher) cleanBeforeScan() {
-	s.Words = make(map[string]map[int]struct{})
-	s.Files = nil
-	s.Errors = nil
-}
-
 func (s *Searcher) Scan() error {
 	s.muGlobal.Lock()
 	defer s.muGlobal.Unlock()
@@ -128,6 +123,52 @@ func (s *Searcher) Scan() error {
 	}
 
 	return nil
+}
+
+func (s *Searcher) ScanPeriodically(ctx context.Context, wg *sync.WaitGroup, interval time.Duration) {
+	s.Scan()
+
+	wg.Done()
+
+	ticker := time.NewTicker(interval)
+
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.Scan()
+		}
+	}
+}
+
+func (s *Searcher) Search(word string) (files []string, errors []error) {
+	s.muGlobal.Lock()
+	defer s.muGlobal.Unlock()
+
+	if s.Errors != nil {
+		return nil, s.Errors
+	}
+
+	if indices, ok := s.Words[word]; ok {
+		for index := range indices {
+			files = append(files, s.Files[index].Path)
+		}
+	}
+
+	if files != nil {
+		return files, nil
+	}
+
+	return nil, []error{fmt.Errorf("no such word in file(s)")}
+}
+
+func (s *Searcher) cleanBeforeScan() {
+	s.Words = make(map[string]map[int]struct{})
+	s.Files = nil
+	s.Errors = nil
 }
 
 func (s *Searcher) predictWalkDir(snc *SearcherSync) {
@@ -223,28 +264,6 @@ func (s *Searcher) readByLine(path string, snc *SearcherSync, index int) error {
 	}
 
 	return nil
-}
-
-func (s *Searcher) Search(word string) (files []string, errors []error) {
-	s.muGlobal.Lock()
-	defer s.muGlobal.Unlock()
-
-	if s.Errors != nil {
-		return nil, s.Errors
-	}
-
-	if indices, ok := s.Words[word]; ok {
-		for index := range indices {
-			files = append(files, s.Files[index].Path)
-		}
-	}
-
-	if files != nil {
-		return files, nil
-	} else {
-		return nil, []error{fmt.Errorf("no such word in file(s)")}
-	}
-
 }
 
 func readByWord(line []byte, index int, resCh chan<- JobResult, errCh chan<- error) error {
